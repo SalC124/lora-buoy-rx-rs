@@ -1,10 +1,10 @@
 use core::convert::TryInto;
 use embedded_svc::{
-    http::{Headers, Method},
-    io::{Read, Write},
+    http::{Method},
+    io::{Write},
     wifi::{AuthMethod, ClientConfiguration, Configuration},
 };
-use esp_idf_svc::hal::{peripherals::Peripherals};
+use esp_idf_svc::hal::{delay::FreeRtos, peripherals::Peripherals};
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     http::server::EspHttpServer,
@@ -12,7 +12,9 @@ use esp_idf_svc::{
     wifi::{BlockingWifi, EspWifi},
 };
 use log::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use anyhow::Context;
 
 const SSID: &'static str = env!("SSID"); // of the wifi to connect to
 const PASSWORD: &'static str = env!("PASS");
@@ -20,17 +22,27 @@ const PASSWORD: &'static str = env!("PASS");
 static INDEX_HTML: &str = include_str!("http_server_page.html");
 
 // Max payload length
-const MAX_LEN: usize = 128;
+
 
 // Need lots of stack to parse JSON
 const STACK_SIZE: usize = 10240;
 
-#[derive(Deserialize)]
-struct FormData<'a> {
-    first_name: &'a str,
-    age: u32,
-    birthplace: &'a str,
+#[derive(Deserialize, Serialize)]
+struct Data {
+    temp: Option<f32>,
+    kpa: Option<f32>,
+    humi: Option<f32>,
+    rssi: Option<f32>,
+    packet: Option<i32>,
 }
+
+static LORA_DATA: Mutex<Data> = Mutex::new(Data {
+    temp: None,
+    kpa: None,
+    humi: None,
+    rssi: None,
+    packet: None,
+});
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -55,43 +67,30 @@ fn main() -> anyhow::Result<()> {
             .write_all(INDEX_HTML.as_bytes())
             .map(|_| ())
     })?;
+    server.fn_handler::<anyhow::Error, _>("/data", Method::Get, |req| {
+        let data = LORA_DATA.lock().unwrap();
+        let json = serde_json::to_string(&*data)?;
 
-    server.fn_handler::<anyhow::Error, _>("/post", Method::Post, |mut req| {
-        let len = req.content_len().unwrap_or(0) as usize;
-
-        if len > MAX_LEN {
-            req.into_status_response(413)?
-                .write_all("Request too big".as_bytes())?;
-            return Ok(());
-        }
-
-        let mut buf = vec![0; len];
-        req.read_exact(&mut buf)?;
-        let mut resp = req.into_ok_response()?;
-
-        if let Ok(form) = serde_json::from_slice::<FormData>(&buf) {
-            write!(
-                resp,
-                "Hello, {}-year-old {} from {}!",
-                form.age, form.first_name, form.birthplace
-            )?;
-        } else {
-            resp.write_all("JSON error".as_bytes())?;
-        }
-
+        req.into_ok_response()
+            .context("Failed to create response")?
+            .write_all(json.as_bytes())
+            .context("Failed to write response")?;
         Ok(())
     })?;
 
-    // Keep wifi and the server running beyond when main() returns (forever)
-    // Do not call this if you ever want to stop or access them later.
-    // Otherwise you can either add an infinite loop so the main task
-    // never returns, or you can move them to another thread.
-    // https://doc.rust-lang.org/stable/core/mem/fn.forget.html
-    core::mem::forget(wifi);
-    core::mem::forget(server);
+    LORA_DATA.lock().unwrap().packet = Some(0);
+    // set up lora + spi
+    loop {
+        // lora.recv();
 
-    // Main task no longer needed, free up some memory
-    Ok(())
+        {
+            let mut data = LORA_DATA.lock().unwrap();
+            if let Some(packets) = data.packet {
+                data.packet = Some(packets + 1);
+            }
+        }
+        FreeRtos::delay_ms(2000);
+    }
 }
 
 fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()> {

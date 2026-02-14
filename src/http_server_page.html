@@ -19,44 +19,18 @@
         </style>
     </head>
     <body>
-        <form id="the-form" action="/post" method="post" accept-charset="utf-8">
-            <label for="first-name">First Name:</label>
-            <input type="text" id="first-name" name="first_name" /><br />
-            <label for="age">Age:</label>
-            <input type="number" id="age" name="age" min="0" max="150" /><br />
-            <label for="birthplace">Birthplace:</label>
-            <input type="text" id="birthplace" name="birthplace" /><br />
-            <input type="submit" value="Submit" />
-        </form>
-        <p id="server-resp"></p>
+        <div id="lora-data"></div>
         <script type="text/javascript">
-            let theForm = document.getElementById("the-form");
-            let serverResp = document.getElementById("server-resp");
+            async function updateData() {
+                let resp = await fetch("/data");
+                let data = await resp.json();
+                document.getElementById("lora-data").innerText =
+                    JSON.stringify(data);
+            }
 
-            theForm.addEventListener("submit", async (e) => {
-                e.preventDefault();
-
-                let form = e.currentTarget;
-                let url = form.action;
-
-                try {
-                    let entries = Object.fromEntries(
-                        new FormData(form).entries(),
-                    );
-                    entries["age"] = parseInt(entries["age"]);
-                    let resp = await fetch(url, {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            Accept: "application/json",
-                        },
-                        body: JSON.stringify(entries),
-                    });
-                    serverResp.innerText = await resp.text();
-                } catch (err) {
-                    console.error(err);
-                }
-            });
+            // Update every 2 seconds
+            setInterval(updateData, 2000);
+            updateData(); // Initial load
         </script>
     </body>
 </html>
