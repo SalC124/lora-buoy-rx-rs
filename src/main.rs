@@ -1,10 +1,21 @@
+use anyhow::Context;
+
 use core::convert::TryInto;
 use embedded_svc::{
-    http::{Method},
-    io::{Write},
+    http::Method,
+    io::Write,
     wifi::{AuthMethod, ClientConfiguration, Configuration},
 };
-use esp_idf_svc::hal::{delay::FreeRtos, peripherals::Peripherals};
+use esp_idf_svc::hal::{
+    delay::FreeRtos,
+    gpio::PinDriver,
+    peripherals::Peripherals,
+    spi::{
+        config::Config, Dma, Spi, SpiBusDriver, SpiConfig, SpiDeviceDriver, SpiDriver,
+        SpiDriverConfig,
+    },
+    units::FromValueType,
+};
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     http::server::EspHttpServer,
@@ -14,15 +25,11 @@ use esp_idf_svc::{
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use anyhow::Context;
 
 const SSID: &'static str = env!("SSID"); // of the wifi to connect to
 const PASSWORD: &'static str = env!("PASS");
 
 static INDEX_HTML: &str = include_str!("http_server_page.html");
-
-// Max payload length
-
 
 // Need lots of stack to parse JSON
 const STACK_SIZE: usize = 10240;
@@ -77,6 +84,29 @@ fn main() -> anyhow::Result<()> {
             .context("Failed to write response")?;
         Ok(())
     })?;
+
+    let spi = SpiDriver::new(
+        peripherals.spi2,
+        peripherals.pins.gpio18,       // sck
+        peripherals.pins.gpio23,       // copi/mosi
+        Some(peripherals.pins.gpio19), // cipo/miso
+        &SpiDriverConfig::new().dma(Dma::Disabled),
+    )
+    .unwrap();
+
+    // let spi_device = SpiDeviceDriver::new(
+    //     spi,
+    //     Some(peripherals.pins.gpio5), // cs
+    //     &Config::new().baudrate(1_u32.MHz().into()),
+    // )
+    // .unwrap();
+
+    let spi_bus = SpiBusDriver::new(spi, &Config::new().baudrate(1_u32.MHz().into())).unwrap();
+
+    let rst = PinDriver::output(peripherals.pins.gpio14).unwrap();
+    let cs = PinDriver::output(peripherals.pins.gpio5).unwrap();
+
+    const FREQUENCY: i64 = 915;
 
     LORA_DATA.lock().unwrap().packet = Some(0);
     // set up lora + spi
