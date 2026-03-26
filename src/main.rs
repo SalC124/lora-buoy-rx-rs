@@ -1,4 +1,5 @@
 use anyhow::Context;
+use rfm9x_rs::Rfm9x;
 
 use core::convert::TryInto;
 use embedded_svc::{
@@ -34,7 +35,7 @@ static INDEX_HTML: &str = include_str!("http_server_page.html");
 // Need lots of stack to parse JSON
 const STACK_SIZE: usize = 10240;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug)]
 struct Data {
     temp: Option<f32>,
     kpa: Option<f32>,
@@ -65,7 +66,7 @@ fn main() -> anyhow::Result<()> {
         sys_loop,
     )?;
 
-    connect_wifi(&mut wifi)?;
+    let url = connect_wifi(&mut wifi)?;
 
     let mut server = create_server()?;
 
@@ -94,36 +95,86 @@ fn main() -> anyhow::Result<()> {
     )
     .unwrap();
 
-    // let spi_device = SpiDeviceDriver::new(
-    //     spi,
-    //     Some(peripherals.pins.gpio5), // cs
-    //     &Config::new().baudrate(1_u32.MHz().into()),
-    // )
-    // .unwrap();
+    let mut spi_device = SpiDeviceDriver::new(
+        spi,
+        Some(peripherals.pins.gpio5), // cs
+        &Config::new().baudrate(1_u32.MHz().into()),
+    )
+    .unwrap();
 
-    let spi_bus = SpiBusDriver::new(spi, &Config::new().baudrate(1_u32.MHz().into())).unwrap();
+    // Remove the old rst pin creation from before
+    // let rst = PinDriver::output(peripherals.pins.gpio14).unwrap();
 
-    let rst = PinDriver::output(peripherals.pins.gpio14).unwrap();
-    let cs = PinDriver::output(peripherals.pins.gpio5).unwrap();
+    info!("=== RFM9x SPI Diagnostic ===");
 
-    const FREQUENCY: i64 = 915;
+    // Manual reset sequence
+    info!("Resetting RFM9x...");
+    let mut rst_pin = PinDriver::output(peripherals.pins.gpio14).unwrap();
+    rst_pin.set_low().unwrap();
+    FreeRtos::delay_ms(10);
+    rst_pin.set_high().unwrap();
+    FreeRtos::delay_ms(10);
 
-    LORA_DATA.lock().unwrap().packet = Some(0);
+    // Test reads
+    info!("Reading version register (0x42)...");
+    for attempt in 0..5 {
+        let mut read_buf = [0x42 & 0x7F, 0x00];
+        if let Ok(()) = spi_device.transfer_in_place(&mut read_buf) {
+            info!(
+                "  Attempt {}: 0x{:02X} (expect 0x12)",
+                attempt + 1,
+                read_buf[1]
+            );
+        }
+        FreeRtos::delay_ms(50);
+    }
+
+    // Initialize with better delays
+    let mut delay = FreeRtos;
+    let mut radio = match Rfm9x::new_with_delay(spi_device, rst_pin, FREQUENCY, &mut delay) {
+        Ok(r) => {
+            info!("✓ Radio initialized!");
+            r
+        }
+        Err(rfm9x_rs::Error::InvalidVersion(ver)) => {
+            error!("✗ Read 0x{:02X}, expected 0x12", ver);
+            panic!("Check wiring and chip type!");
+        }
+        Err(e) => panic!("Radio error: {:?}", e),
+    };
+
+    const FREQUENCY: u32 = 915;
+
+    // let mut radio = Rfm9x::new(spi_device, rst_pin, FREQUENCY).expect("Radio init failed");
+    let mut buf = [0u8; 256];
+
     // set up lora + spi
-    loop {
-        // lora.recv();
+    '_main_loop: loop {
+        if let Ok(_len) = radio.poll_recv(&mut buf) {
+            let payload = &buf;
+            info!("Received packet: {:?}", payload);
 
-        {
-            let mut data = LORA_DATA.lock().unwrap();
-            if let Some(packets) = data.packet {
-                data.packet = Some(packets + 1);
+            if let Some(start) = payload.iter().position(|&b| b == b'{') {
+                if let Some(end) = payload.iter().rposition(|&b| b == b'}') {
+                    let json_slice = &payload[start..=end];
+                    if let Ok(payload_str) = core::str::from_utf8(json_slice) {
+                        info!("Payload as string: {}", payload_str);
+                        match serde_json::from_str::<Data>(payload_str.trim()) {
+                            Ok(parsed) => {
+                                let mut data = LORA_DATA.lock().unwrap();
+                                *data = parsed;
+                            }
+                            Err(e) => error!("JSON parse error: {}", e),
+                        }
+                    }
+                }
             }
         }
-        FreeRtos::delay_ms(2000);
+        FreeRtos::delay_ms(1000);
     }
 }
 
-fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()> {
+fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<String> {
     let wifi_configuration: Configuration = Configuration::Client(ClientConfiguration {
         ssid: SSID.try_into().unwrap(),
         bssid: None,
@@ -158,7 +209,15 @@ fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()>
     info!("Wifi DHCP info: {:?}", ip_info);
     info!("Visit http://{}", ip_info.ip);
 
-    Ok(())
+    let ip_address = format!("{}", ip_info.ip);
+
+    let url: String = ip_address
+        .split('.')
+        .map(|octet| format!("{:02X}", octet.parse::<u8>().unwrap()))
+        .collect::<Vec<String>>()
+        .join(".");
+
+    Ok(url)
 }
 
 fn create_server() -> anyhow::Result<EspHttpServer<'static>> {
