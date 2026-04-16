@@ -26,7 +26,11 @@ use log::*;
 const SSID: &'static str = env!("SSID"); // of the wifi to connect to
 const PASSWORD: &'static str = env!("PASS");
 
+#[cfg(debug_assertions)]
 const URI: &'static str = concat!(env!("URL"), ":", env!("PORT")); // of the backend
+
+#[cfg(not(debug_assertions))]
+const URI: &'static str = "https://lora-buoy-backend-rs.onrender.com";
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
